@@ -2161,6 +2161,13 @@ def _v4_component_type_from_mount(mount):
     return str(getattr(mount, "equipment_type", None) or getattr(mount, "asset_type", None) or "unknown").strip().lower() or "unknown"
 
 
+def _auto_is_coupling_end(mount):
+    text = f" {mount.point_name or ''} {mount.mount_location or ''} ".lower().replace("_", " ").replace("-", " ")
+    if "nde" in text or "non drive" in text:
+        return False
+    return any(token in text for token in [" coupling ", " drive end ", " de "])
+
+
 def _v4_installed_on_from_mount(mount):
     text = f"{mount.mount_type or ''} {mount.mount_location or ''} {mount.point_name or ''}".lower()
     if "foundation" in text:
