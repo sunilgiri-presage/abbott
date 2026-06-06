@@ -1044,6 +1044,7 @@ class AlarmQueueMaster(models.Model):
 
     class Meta:
         db_table = 'alarm_queue_master'
+        managed = False
         ordering = ['-created_at']
 
 
@@ -1076,6 +1077,7 @@ class AssetDiagnosticReportMaster(models.Model):
 
     class Meta:
         db_table = 'asset_diagnostic_report_master'
+        managed = False
         ordering = ['-created_at']
 
 class SensorOrientationMaster(models.Model):
