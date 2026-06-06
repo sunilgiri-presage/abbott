@@ -15,7 +15,7 @@ from app.models import DeviceModelMaster,DeviceMountMaster,HardwareMaster,\
                                                                 AutoVelocityHarmonicsMaster, DiagnosticsValuesMaster, DiagnosticsDynamicThresholdValuesMaster, \
                                                                 DiagnosticThresholdCounterMaster, AutoCorrelationMaster, GatewayMountMaster, SensorStatusNotifications, \
                                                                     AcousticsSpectrumMaster, MagneticFluxSpectrumMaster, MagneticFluxStatMaster, AssetUtilityMaster, AssetRunningVibrationValue, \
-                                                                    RuleBaseDiagnosticsMaster
+                                                                    RuleBaseDiagnosticsMaster, AlarmQueueMaster, AssetDiagnosticReportMaster
 
 
 
@@ -313,6 +313,18 @@ class AlarmHistoryMasterSerializer(serializers.ModelSerializer):
         fields = ["composite", "timestamp", "signal_type", "trend_type", "axis", "priority", "sensor_location", "asset_id", "threshold_value", "observed_value"]
 
 
+class AlarmQueueMasterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AlarmQueueMaster
+        fields = "__all__"
+
+
+class AssetDiagnosticReportMasterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AssetDiagnosticReportMaster
+        fields = "__all__"
+
+
 class DiagnosticAlarmHistoryMasterSerializer(serializers.ModelSerializer):
     class Meta:
         model = AlarmHistoryMaster
@@ -466,6 +478,5 @@ class RuleBaseDiagnosticsMasterSerializer(serializers.ModelSerializer):
     class Meta:
         model = RuleBaseDiagnosticsMaster
         fields = ["composite",'asset_id', 'faults_detected']
-
 
 

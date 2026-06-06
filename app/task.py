@@ -1,4 +1,5 @@
-from celery import shared_task
+from celery import shared_task, chain
+import logging
 from time import sleep
 from app.SPFunctions.SignalProcessing import getPeak, omegaArithmetic, getRMS, peakDetect, getEnvelope, getPeak_to_peak, bandPassFilter, StatFunctionsAdjustment, highPassFilter, getFilterValues, bandStopFilter
 from app.SPFunctions.fftFunctions import getFFT, FFTAnalysisTwoSide, getFFT10K, getFFT20K
@@ -12,8 +13,10 @@ import numpy as np
 from rest_framework.response import Response
 from rest_framework import status
 import json
-# from scipy.stats import kurtosis
-from app.bearingLib.pyvib.features import kurtosis
+try:
+    from app.bearingLib.pyvib.features import kurtosis
+except ImportError:
+    from scipy.stats import kurtosis
 from django.forms.models import model_to_dict
 import pdb
 import datetime
@@ -28,7 +31,10 @@ from app.cache import get_threshold_data, get_threshold_counter_data, updateThre
 from django.template.loader import render_to_string, get_template
 from django.core.mail import send_mail, EmailMessage, EmailMultiAlternatives
 from django.core.mail import send_mail
+from django.core.serializers.json import DjangoJSONEncoder
 from .cache import redis_client_rms_batch
+
+logger = logging.getLogger(__name__)
 
 timezone_list = {
   "IN": "Asia/Kolkata",
@@ -50,6 +56,92 @@ def sleepy(duration):
     print("printing from task file after celery job done iiiiiiiiii")
     return None
 
+
+def _json_safe_alarm_payload(value):
+    return json.loads(json.dumps(value or {}, cls=DjangoJSONEncoder, default=str))
+
+
+def save_alarm_to_queue(alarmHistoryData, device_asset_id, device_composite, priority):
+    try:
+        alarmQueueData = _json_safe_alarm_payload(alarmHistoryData)
+        alarmQueueData["status"] = "pending"
+        alarmQueueData.setdefault("asset_id", device_asset_id)
+
+        try:
+            mount_obj = models.DeviceMountMaster.objects.filter(composite_id=device_composite).first()
+            alarmQueueData["org_id"] = mount_obj.org_id if mount_obj else None
+        except Exception:
+            alarmQueueData["org_id"] = None
+
+        alarmQueueData.setdefault("asset_name", None)
+        alarmQueueData.setdefault("location_name", None)
+        alarmQueueData.setdefault("company_name", None)
+        alarmQueueData["priority"] = priority
+
+        alarmQueueSerializer = serializers.AlarmQueueMasterSerializer(data=alarmQueueData)
+        if alarmQueueSerializer.is_valid():
+            alarmQueueSerializer.save()
+            print(f"Alarm saved and queued for admin approval: {device_composite} - {priority}")
+        else:
+            print("Error saving alarm to queue:", alarmQueueSerializer.errors)
+    except Exception as exc:
+        print(f"Error in save_alarm_to_queue: {exc}")
+
+
+@shared_task(queue='defaultQueue')
+def run_alarm_diagnostics_report(alarm_source, alarm_id, asset_id, alarm_snapshot=None):
+    from app.cron import run_asset_diagnostics_v4
+
+    alarm_source = alarm_source or "alarm_history"
+    alarm_history_id = alarm_id if alarm_source == "alarm_history" else None
+    alarm_queue_id = alarm_id if alarm_source == "alarm_queue" else None
+
+    response_data, response_status, _diagnostic_input, report_obj = run_asset_diagnostics_v4(
+        asset_id,
+        payload={"asset_id": asset_id},
+        persist=True,
+        trigger_source=alarm_source,
+        alarm_history_id=alarm_history_id,
+        alarm_queue_id=alarm_queue_id,
+        alarm_snapshot=alarm_snapshot,
+    )
+
+    return {
+        "status": "success" if response_status < 500 else "error",
+        "asset_id": asset_id,
+        "alarm_source": alarm_source,
+        "alarm_id": alarm_id,
+        "diagnostic_report_id": getattr(report_obj, "id", None),
+        "result": response_data.get("result"),
+    }
+
+
+def queue_alarm_mail_and_diagnostics(alarmHistoryData, alarm_source, alarm_id, asset_id=None, alarm_snapshot=None):
+    asset_id = asset_id or (alarmHistoryData or {}).get("asset_id")
+    alarm_snapshot = _json_safe_alarm_payload(alarm_snapshot or alarmHistoryData)
+    return chain(
+        sendMailSingle.s(alarmHistoryData),
+        run_alarm_diagnostics_report.si(alarm_source, alarm_id, asset_id, alarm_snapshot),
+    ).delay()
+
+
+def _coerce_alarm_timestamp(timestamp):
+    if isinstance(timestamp, str):
+        try:
+            return datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except Exception:
+            try:
+                parsed = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                return pytz.UTC.localize(parsed)
+            except Exception:
+                return datetime.datetime.now(pytz.UTC)
+    if hasattr(timestamp, "astimezone"):
+        if getattr(timestamp, "tzinfo", None) is None:
+            return pytz.UTC.localize(timestamp)
+        return timestamp
+    return datetime.datetime.now(pytz.UTC)
+
+
 def updateDbSendMail(
         counter_param_pointer,
         rep_param_pointer,
@@ -70,7 +162,21 @@ def updateDbSendMail(
     elif level == '3':
         priority = "Critical"
 
-    if counter_param_pointer >= rep_param_pointer:
+    try:
+        current_counter = int(counter_param_pointer)
+    except Exception:
+        logger.exception("Invalid current counter for %s: %s", comp_key, counter_param_pointer)
+        updateThreshCounterDB(comp_key, counter_values)
+        return True
+
+    try:
+        rep_threshold = int(rep_param_pointer)
+    except Exception:
+        logger.exception("Invalid repetition pointer for %s: %s", comp_key, rep_param_pointer)
+        updateThreshCounterDB(comp_key, counter_values)
+        return True
+
+    if current_counter >= rep_threshold:
         res = check_last_mail_timestamp(comp_key, round(datetime.datetime.now().timestamp()))
         print("--------------------res-----------------", res)
         
@@ -85,15 +191,15 @@ def updateDbSendMail(
                 deviceMountData = get_mount_data(macID)
                 device_location = deviceMountData.get("point_name")+'-'+deviceMountData.get("mount_location")
                 device_asset_id = stat_values.get("asset_id")
-            except:
+            except Exception:
                 try:
                     deviceMountData = models.DeviceMountMaster.objects.get(id=stat_values.get("mount_id"))
                     device_location = deviceMountData.point_name+'-'+deviceMountData.mount_location
                     device_asset_id = deviceMountData.asset_id
-                except:
+                except Exception:
                     print("Device mount data not found for composite:", stat_values.get("composite"))
                     device_location = "-"
-                    device_asset_id = deviceMountData.get("asset_id")
+                    device_asset_id = stat_values.get("asset_id")
 
             alarmData = {"composite": stat_values.get("composite"), "signal_type": threshold_values.get("signal_type"), 
                         "trend_type": statFunction+"_amp", "axis": threshold_values.get("axis").lower(), "priority": priority,
@@ -102,10 +208,19 @@ def updateDbSendMail(
             alarmHistoryDataSerializer = serializers.AlarmHistoryMasterSerializer(data=alarmData)
             try:
                 if alarmHistoryDataSerializer.is_valid():
-                    alarmHistoryDataSerializer.save()
-                    sendMailSingle.delay(alarmData)
+                    alarm_history = alarmHistoryDataSerializer.save()
+                    queue_alarm_mail_and_diagnostics(
+                        alarmData,
+                        alarm_source="alarm_history",
+                        alarm_id=alarm_history.id,
+                        asset_id=device_asset_id,
+                        alarm_snapshot=alarmData,
+                    )
                     print("mail sent function triggered")
+                    save_alarm_to_queue(alarmData, device_asset_id, stat_values.get("composite"), priority)
                     result = updateThreshCounterDB(comp_key, counter_values)
+                else:
+                    print("AlarmHistoryMasterSerializer validation failed:", alarmHistoryDataSerializer.errors)
             except Exception as e3:
                 print("exception 3", e3)
                 result = updateThreshCounterDB(comp_key, counter_values)
@@ -124,24 +239,27 @@ def checkValuesAgainstThreshold(threshold_values, counter_values, stat_values, s
     composite_full = threshold_values.get("composite")
     mount_id = composite_full.split('_')[-1]
     comp_key = str(mount_id) + '-' + threshold_values.get("axis") + '-' + threshold_values.get("signal_type") + '-' + threshold_values.get("domain")
-    
+
     for statFunction in statfunctionList:
         current_value = stat_values.get(statFunction)
-        level_3_threshold = threshold_values.get(statFunction+'_amp_level_3', 0)
-        level_2_threshold = threshold_values.get(statFunction+'_amp_level_2', 0)
-        level_1_threshold = threshold_values.get(statFunction+'_amp_level_1', 0)
-        
-        # Determine which level the current value is in
+        level_3_threshold = threshold_values.get(statFunction + '_amp_level_3', 0)
+        level_2_threshold = threshold_values.get(statFunction + '_amp_level_2', 0)
+        level_1_threshold = threshold_values.get(statFunction + '_amp_level_1', 0)
+
+        # Determine which level the current value is in.
+        # A value can only be in ONE level - the highest one it qualifies for.
         in_level_3 = (level_3_threshold > 0 and current_value >= level_3_threshold)
         in_level_2 = (level_2_threshold > 0 and current_value >= level_2_threshold and not in_level_3)
         in_level_1 = (level_1_threshold > 0 and current_value >= level_1_threshold and not in_level_2 and not in_level_3)
-        
+
+        in_any_level = in_level_3 or in_level_2 or in_level_1
+
         # ============= LEVEL 3 (Critical) =============
         if in_level_3:
-            counter_param = statFunction + '_amp_counter_level_3'
+            counter_param   = statFunction + '_amp_counter_level_3'
             timestamp_param = statFunction + '_amp_repetition_level_3_timestamp'
-            
-            counter = counter_values.get(counter_param, 0)
+
+            counter       = counter_values.get(counter_param, 0)
             counter_value = counter + 1
             counter_values[counter_param] = counter_value
 
@@ -151,42 +269,30 @@ def checkValuesAgainstThreshold(threshold_values, counter_values, stat_values, s
                     counter_values[timestamp_param] = timestamp_value
                 else:
                     counter_values[timestamp_param] = timestamp_value.isoformat()
-            except:
+            except Exception:
                 counter_values[timestamp_param] = datetime.datetime.now().isoformat()
 
             rep_param_pointer = counter_values.get(statFunction + '_amp_repetition_level_3')
-            
+
             updateDbSendMail(
-                counter_value, 
-                rep_param_pointer, 
-                comp_key, 
-                counter_values, 
-                counter_param, 
+                counter_value,
+                rep_param_pointer,
+                comp_key,
+                counter_values,
+                counter_param,
                 threshold_values,
                 statFunction,
                 stat_values,
                 timestamp_param,
                 "3"
             )
-            
-            # Reset lower level counters since we're in a higher priority zone
-            counter_values[statFunction + '_amp_counter_level_2'] = 0
-            counter_values[statFunction + '_amp_counter_level_1'] = 0
-            counter_values[statFunction + '_amp_repetition_level_2_timestamp'] = datetime.datetime.now().isoformat()
-            counter_values[statFunction + '_amp_repetition_level_1_timestamp'] = datetime.datetime.now().isoformat()
-            
-        else:
-            # Not in Level 3, reset its counter
-            counter_values[statFunction + '_amp_counter_level_3'] = 0
-            counter_values[statFunction + '_amp_repetition_level_3_timestamp'] = datetime.datetime.now().isoformat()
-            updateThreshCounterDB(comp_key, counter_values)
-        
+
         # ============= LEVEL 2 (Danger) =============
-        if in_level_2:
-            counter_param = statFunction + '_amp_counter_level_2'
+        elif in_level_2:
+            counter_param   = statFunction + '_amp_counter_level_2'
             timestamp_param = statFunction + '_amp_repetition_level_2_timestamp'
-            
-            counter = counter_values.get(counter_param, 0)
+
+            counter       = counter_values.get(counter_param, 0)
             counter_value = counter + 1
             counter_values[counter_param] = counter_value
 
@@ -196,41 +302,30 @@ def checkValuesAgainstThreshold(threshold_values, counter_values, stat_values, s
                     counter_values[timestamp_param] = timestamp_value
                 else:
                     counter_values[timestamp_param] = timestamp_value.isoformat()
-            except:
+            except Exception:
                 counter_values[timestamp_param] = datetime.datetime.now().isoformat()
 
             rep_param_pointer = counter_values.get(statFunction + '_amp_repetition_level_2')
-            
+
             updateDbSendMail(
-                counter_value, 
-                rep_param_pointer, 
-                comp_key, 
-                counter_values, 
-                counter_param, 
+                counter_value,
+                rep_param_pointer,
+                comp_key,
+                counter_values,
+                counter_param,
                 threshold_values,
                 statFunction,
                 stat_values,
                 timestamp_param,
                 "2"
             )
-            
-            # Reset lower level counter
-            counter_values[statFunction + '_amp_counter_level_1'] = 0
-            counter_values[statFunction + '_amp_repetition_level_1_timestamp'] = datetime.datetime.now().isoformat()
-            
-        else:
-            # Not in Level 2, reset its counter (only if not in Level 3)
-            if not in_level_3:
-                counter_values[statFunction + '_amp_counter_level_2'] = 0
-                counter_values[statFunction + '_amp_repetition_level_2_timestamp'] = datetime.datetime.now().isoformat()
-                updateThreshCounterDB(comp_key, counter_values)
-        
+
         # ============= LEVEL 1 (Alert) =============
-        if in_level_1:
-            counter_param = statFunction + '_amp_counter_level_1'
+        elif in_level_1:
+            counter_param   = statFunction + '_amp_counter_level_1'
             timestamp_param = statFunction + '_amp_repetition_level_1_timestamp'
-            
-            counter = counter_values.get(counter_param, 0)
+
+            counter       = counter_values.get(counter_param, 0)
             counter_value = counter + 1
             counter_values[counter_param] = counter_value
 
@@ -240,162 +335,155 @@ def checkValuesAgainstThreshold(threshold_values, counter_values, stat_values, s
                     counter_values[timestamp_param] = timestamp_value
                 else:
                     counter_values[timestamp_param] = timestamp_value.isoformat()
-            except:
+            except Exception:
                 counter_values[timestamp_param] = datetime.datetime.now().isoformat()
 
             rep_param_pointer = counter_values.get(statFunction + '_amp_repetition_level_1')
-            
+
             updateDbSendMail(
-                counter_value, 
-                rep_param_pointer, 
-                comp_key, 
-                counter_values, 
-                counter_param, 
+                counter_value,
+                rep_param_pointer,
+                comp_key,
+                counter_values,
+                counter_param,
                 threshold_values,
                 statFunction,
                 stat_values,
                 timestamp_param,
                 "1"
             )
-            
-        else:
-            # Not in Level 1, reset its counter (only if not in Level 2 or 3)
-            if not in_level_2 and not in_level_3:
-                counter_values[statFunction + '_amp_counter_level_1'] = 0
-                counter_values[statFunction + '_amp_repetition_level_1_timestamp'] = datetime.datetime.now().isoformat()
+
+        # ============= HEALTHY ZONE =============
+        if not in_any_level:
+            now_iso = datetime.datetime.now().isoformat()
+            counter_values[statFunction + '_amp_counter_level_3'] = 0
+            counter_values[statFunction + '_amp_counter_level_2'] = 0
+            counter_values[statFunction + '_amp_counter_level_1'] = 0
+            counter_values[statFunction + '_amp_repetition_level_3_timestamp'] = now_iso
+            counter_values[statFunction + '_amp_repetition_level_2_timestamp'] = now_iso
+            counter_values[statFunction + '_amp_repetition_level_1_timestamp'] = now_iso
+            updateThreshCounterDB(comp_key, counter_values)
 
     # ============= HARMONICS PROCESSING =============
-    if harmonic_values != None and harmonicsList != None:
+    if harmonic_values is not None and harmonicsList is not None:
         for harmonic in harmonicsList:
-            harmonic_key = harmonic + '_amp'
+            harmonic_key  = harmonic + '_amp'
             current_value = harmonic_values.get(harmonic_key)
-            
+
             if current_value is None:
                 continue
-                
-            level_3_threshold = threshold_values.get(harmonic+'_amp_level_3', 0)
-            level_2_threshold = threshold_values.get(harmonic+'_amp_level_2', 0)
-            level_1_threshold = threshold_values.get(harmonic+'_amp_level_1', 0)
-            
+
+            level_3_threshold = threshold_values.get(harmonic + '_amp_level_3', 0)
+            level_2_threshold = threshold_values.get(harmonic + '_amp_level_2', 0)
+            level_1_threshold = threshold_values.get(harmonic + '_amp_level_1', 0)
+
             in_level_3 = (level_3_threshold > 0 and current_value >= level_3_threshold)
             in_level_2 = (level_2_threshold > 0 and current_value >= level_2_threshold and not in_level_3)
             in_level_1 = (level_1_threshold > 0 and current_value >= level_1_threshold and not in_level_2 and not in_level_3)
-            
+
+            in_any_level = in_level_3 or in_level_2 or in_level_1
+
             # ============= LEVEL 3 (Critical) =============
             if in_level_3:
-                counter_param = harmonic + '_amp_counter_level_3'
+                counter_param   = harmonic + '_amp_counter_level_3'
                 timestamp_param = harmonic + '_amp_repetition_level_3_timestamp'
-                
-                counter = counter_values.get(counter_param, 0)
+
+                counter       = counter_values.get(counter_param, 0)
                 counter_value = counter + 1
                 counter_values[counter_param] = counter_value
-                
+
                 try:
                     timestamp_value = harmonic_values.get("timestamp")
                     counter_values[timestamp_param] = timestamp_value.isoformat()
-                except:
+                except Exception:
                     counter_values[timestamp_param] = datetime.datetime.now().isoformat()
 
                 rep_param_pointer = counter_values.get(harmonic + '_amp_repetition_level_3')
-                
+
                 updateDbSendMail(
-                    counter_value, 
-                    rep_param_pointer, 
-                    comp_key, 
-                    counter_values, 
-                    counter_param, 
+                    counter_value,
+                    rep_param_pointer,
+                    comp_key,
+                    counter_values,
+                    counter_param,
                     threshold_values,
                     harmonic,
                     harmonic_values,
                     timestamp_param,
                     "3"
                 )
-                
-                counter_values[harmonic + '_amp_counter_level_2'] = 0
-                counter_values[harmonic + '_amp_counter_level_1'] = 0
-                counter_values[harmonic + '_amp_repetition_level_2_timestamp'] = datetime.datetime.now().isoformat()
-                counter_values[harmonic + '_amp_repetition_level_1_timestamp'] = datetime.datetime.now().isoformat()
-                
-            else:
-                counter_values[harmonic + '_amp_counter_level_3'] = 0
-                counter_values[harmonic + '_amp_repetition_level_3_timestamp'] = datetime.datetime.now().isoformat()
-                updateThreshCounterDB(comp_key, counter_values)
-            
+
             # ============= LEVEL 2 (Danger) =============
-            if in_level_2:
-                counter_param = harmonic + '_amp_counter_level_2'
+            elif in_level_2:
+                counter_param   = harmonic + '_amp_counter_level_2'
                 timestamp_param = harmonic + '_amp_repetition_level_2_timestamp'
-                
-                counter = counter_values.get(counter_param, 0)
+
+                counter       = counter_values.get(counter_param, 0)
                 counter_value = counter + 1
                 counter_values[counter_param] = counter_value
 
                 try:
                     timestamp_value = harmonic_values.get("timestamp")
                     counter_values[timestamp_param] = timestamp_value.isoformat()
-                except:
+                except Exception:
                     counter_values[timestamp_param] = datetime.datetime.now().isoformat()
-                
+
                 rep_param_pointer = counter_values.get(harmonic + '_amp_repetition_level_2')
-                
+
                 updateDbSendMail(
-                    counter_value, 
-                    rep_param_pointer, 
-                    comp_key, 
-                    counter_values, 
-                    counter_param, 
+                    counter_value,
+                    rep_param_pointer,
+                    comp_key,
+                    counter_values,
+                    counter_param,
                     threshold_values,
                     harmonic,
                     harmonic_values,
                     timestamp_param,
                     "2"
                 )
-                
-                counter_values[harmonic + '_amp_counter_level_1'] = 0
-                counter_values[harmonic + '_amp_repetition_level_1_timestamp'] = datetime.datetime.now().isoformat()
-                
-            else:
-                if not in_level_3:
-                    counter_values[harmonic + '_amp_counter_level_2'] = 0
-                    counter_values[harmonic + '_amp_repetition_level_2_timestamp'] = datetime.datetime.now().isoformat()
-                    updateThreshCounterDB(comp_key, counter_values)
-            
+
             # ============= LEVEL 1 (Alert) =============
-            if in_level_1:
-                counter_param = harmonic + '_amp_counter_level_1'
+            elif in_level_1:
+                counter_param   = harmonic + '_amp_counter_level_1'
                 timestamp_param = harmonic + '_amp_repetition_level_1_timestamp'
-                
-                counter = counter_values.get(counter_param, 0)
+
+                counter       = counter_values.get(counter_param, 0)
                 counter_value = counter + 1
                 counter_values[counter_param] = counter_value
 
                 try:
                     timestamp_value = harmonic_values.get("timestamp")
                     counter_values[timestamp_param] = timestamp_value.isoformat()
-                except:
+                except Exception:
                     counter_values[timestamp_param] = datetime.datetime.now().isoformat()
-                
+
                 rep_param_pointer = counter_values.get(harmonic + '_amp_repetition_level_1')
-                
+
                 updateDbSendMail(
-                    counter_value, 
-                    rep_param_pointer, 
-                    comp_key, 
-                    counter_values, 
-                    counter_param, 
+                    counter_value,
+                    rep_param_pointer,
+                    comp_key,
+                    counter_values,
+                    counter_param,
                     threshold_values,
                     harmonic,
                     harmonic_values,
                     timestamp_param,
                     "1"
                 )
-                
-            else:
-                if not in_level_2 and not in_level_3:
-                    counter_values[harmonic + '_amp_counter_level_1'] = 0
-                    counter_values[harmonic + '_amp_repetition_level_1_timestamp'] = datetime.datetime.now().isoformat()
-                    updateThreshCounterDB(comp_key, counter_values)
-    
+
+            # ============= HEALTHY ZONE =============
+            if not in_any_level:
+                now_iso = datetime.datetime.now().isoformat()
+                counter_values[harmonic + '_amp_counter_level_3'] = 0
+                counter_values[harmonic + '_amp_counter_level_2'] = 0
+                counter_values[harmonic + '_amp_counter_level_1'] = 0
+                counter_values[harmonic + '_amp_repetition_level_3_timestamp'] = now_iso
+                counter_values[harmonic + '_amp_repetition_level_2_timestamp'] = now_iso
+                counter_values[harmonic + '_amp_repetition_level_1_timestamp'] = now_iso
+                updateThreshCounterDB(comp_key, counter_values)
+
     return True
 
     
@@ -1861,7 +1949,7 @@ def sendMailSingle(alarmHistoryData):
                 country_code = timezone_list.get("IN")
                 country_tz = pytz.timezone(country_code)
  
-            dt_country = alarmHistoryData.get("timestamp").astimezone(country_tz)
+            dt_country = _coerce_alarm_timestamp(alarmHistoryData.get("timestamp")).astimezone(country_tz)
  
             start, end = createRandom(4)
             # url = "http://localhost:4200/redirect?key="                         # local url
@@ -1976,7 +2064,7 @@ def sendMailSingle(alarmHistoryData):
  
             To review more details, please log in to the system: {final_data.get("redirect_url")}
  
-            —
+            -
             Team Presage Insights"""
  
             mail_sending_time = datetime.datetime.now(pytz.UTC).astimezone(country_tz).strftime("%m-%d-%Y, %I:%M:%S %p")

@@ -25,6 +25,8 @@ urlpatterns = [
     # ************************* dynamic threshold urls path *************************
     path('set_dynamic_threshold/', thresholdFunctions.CheckDynamicThreshold.as_view(), name='set_dynamic_threshold'),
     path('auto_diagnostics/', calculateAutoDiagnostics, name='auto_diagnostics'),
+    path('asset_diagnostics_v4/', cron_views.AssetDiagnosticsV4.as_view(), name='asset_diagnostics_v4'),
+    path('test_asset_diagnostics_alarm_flow/', cron_views.TestAssetDiagnosticsAlarmFlow.as_view(), name='test_asset_diagnostics_alarm_flow'),
 
 
     # ************************* checkThresholdCounterAPI *************************

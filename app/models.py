@@ -1012,6 +1012,72 @@ class AlarmHistoryMaster(models.Model):
         db_table = 'alarm_history_master'
         # managed = False  
 
+
+class AlarmQueueMaster(models.Model):
+    ALARM_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('send', 'Send'),
+        ('rejected', 'Rejected'),
+    ]
+
+    composite = models.CharField(max_length=150)
+    signal_type = models.CharField(max_length=50)
+    trend_type = models.CharField(max_length=50)
+    axis = models.CharField(max_length=10)
+    priority = models.CharField(max_length=20)
+    sensor_location = models.CharField(max_length=200)
+    asset_id = models.CharField(max_length=150)
+    org_id = models.CharField(max_length=150, null=True, blank=True)
+    asset_name = models.CharField(max_length=200, null=True, blank=True)
+    location_name = models.CharField(max_length=200, null=True, blank=True)
+    company_name = models.CharField(max_length=200, null=True, blank=True)
+    timestamp = models.DateTimeField()
+    threshold_value = models.FloatField()
+    observed_value = models.FloatField()
+    status = models.CharField(max_length=20, choices=ALARM_STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    approved_by = models.CharField(max_length=100, null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    mail_sent_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'alarm_queue_master'
+        ordering = ['-created_at']
+
+
+class AssetDiagnosticReportMaster(models.Model):
+    STATUS_CHOICES = [
+        ('completed', 'Completed'),
+        ('no_faults', 'No Faults'),
+        ('failed', 'Failed'),
+    ]
+
+    TRIGGER_SOURCE_CHOICES = [
+        ('api', 'API'),
+        ('alarm_history', 'Alarm History'),
+        ('alarm_queue', 'Alarm Queue'),
+    ]
+
+    asset_id = models.CharField(max_length=150, null=True, blank=True, db_index=True)
+    trigger_source = models.CharField(max_length=50, choices=TRIGGER_SOURCE_CHOICES, default='api')
+    alarm_history = models.ForeignKey(AlarmHistoryMaster, on_delete=models.SET_NULL, null=True, blank=True)
+    alarm_queue = models.ForeignKey(AlarmQueueMaster, on_delete=models.SET_NULL, null=True, blank=True)
+    alarm_snapshot = models.JSONField(null=True, blank=True)
+    diagnostic_input = models.JSONField(null=True, blank=True)
+    report_json = models.JSONField(null=True, blank=True)
+    response_json = models.JSONField(null=True, blank=True)
+    result = models.IntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='completed')
+    error_message = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'asset_diagnostic_report_master'
+        ordering = ['-created_at']
+
 class SensorOrientationMaster(models.Model):
     position = models.CharField(max_length=150, null=True, blank=True)
     x = models.CharField(max_length=50, null=True, blank=True)
