@@ -31,6 +31,10 @@ from rest_framework.decorators import api_view
 from django.db import transaction
 from django.conf import settings
 from celery import shared_task
+
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
 from app.auto_diagnostics.impact_diagnostics_v4 import (
     build_impact_axis_feature_cache,
     detect_bearing_fault_frequencies,
@@ -927,7 +931,7 @@ def get_minutes_difference(timestamp1, timestamp2):
 def checkSensorLiveStatus():
     try:
         print(f"checkSensorLiveStatus started at {datetime.now(pytz.utc)}")
-        redis_client = redis.StrictRedis(host='localhost', port=6379, db=2)     # for live server
+        redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=2)     # for live server
 
         # Fetch composite_* keys and extract composite_id from key name
         keys = redis_client.keys('composite_*')
@@ -1193,7 +1197,7 @@ def CalculateAssetUtilityScore(request):
 def DumpCounterDataToDatabase(request):
     if request.method == 'GET':
         # redis_client = redis.StrictRedis(host='localhost', port=6379, db=9)         # for testing server only
-        redis_client = redis.StrictRedis(host='localhost', port=6379, db=5)         # for live server only
+        redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=5)         # for live server only
 
         # Fetch all keys from Redis
         keys = redis_client.keys('*')  # Adjust the pattern if needed to fetch specific keys
@@ -1236,7 +1240,7 @@ def DumpCounterDataToDatabase(request):
 def DumpCounterDataToDatabaseV2():
 
     # redis_client = redis.StrictRedis(host='localhost', port=6379, db=9)         # for testing server only
-    redis_client = redis.StrictRedis(host='localhost', port=6379, db=5)         # for live server only
+    redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=5)         # for live server only
 
     # Fetch all keys from Redis
     keys = redis_client.keys('*')  # Adjust the pattern if needed to fetch specific keys

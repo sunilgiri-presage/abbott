@@ -1,15 +1,19 @@
 from django.db import connection
 import redis
 import json
+import os
 from app import models
 
 # Configure Redis connection live
-redis_client_mount = redis.StrictRedis(host='localhost', port=6379, db=2)
-redis_client_orientation = redis.StrictRedis(host='localhost', port=6379, db=3)
-redis_client_threshold = redis.StrictRedis(host='localhost', port=6379, db=4)
-redis_client_threshold_counter = redis.StrictRedis(host='localhost', port=6379, db=5)
-redis_client_rms_batch = redis.StrictRedis(host='localhost', port=6379, db=7, decode_responses=True)
-redis_client_alarm_timestamp = redis.StrictRedis(host='localhost', port=6379, db=11, decode_responses=False)
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
+redis_client_mount = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=2)
+redis_client_orientation = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=3)
+redis_client_threshold = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=4)
+redis_client_threshold_counter = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=5)
+redis_client_rms_batch = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=7, decode_responses=True)
+redis_client_alarm_timestamp = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=11, decode_responses=False)
 
 # Configure Redis connection test
 # redis_client_mount_test = redis.StrictRedis(host='localhost', port=6379, db=6)

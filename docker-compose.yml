@@ -42,11 +42,13 @@ services:
       - DJANGO_SETTINGS_MODULE=dashboard.settings
       - NUMBA_CACHE_DIR=/tmp/numba_cache
       - NUMBA_DISABLE_JIT=0
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6379
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
-      - "localhost:host-gateway"
+      - "host.docker.internal:host-gateway"
     networks:
       - backend
     restart: always
