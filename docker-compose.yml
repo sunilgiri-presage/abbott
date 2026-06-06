@@ -1,0 +1,180 @@
+services:
+  redis:
+    image: redis:6
+    network_mode: host
+    command: redis-server --appendonly yes --save 900 1 --save 300 10 --save 60 10000 --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped 
+    mem_limit: 2.5g
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  web:
+    build: .
+    command: >
+      gunicorn dashboard.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers 3
+      --timeout 120
+      --limit-request-field_size 0
+      --limit-request-line 0
+      --access-logfile -
+      --error-logfile -
+      --access-logformat '%(h)s %(t)s "%(r)s" %(s)s %(b)s'
+    volumes:
+      - .:/usr/src/app
+      - numba_cache:/tmp/numba_cache
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DEBUG=1
+      - DJANGO_SETTINGS_MODULE=dashboard.settings
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+      - NUMBA_DISABLE_JIT=0
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - backend
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  celery-wired-rms:
+    build: .
+    command: celery -A dashboard worker -n worker.wired@%h -Q wiredRmsQueue -l info
+    volumes:
+      - .:/usr/src/app
+      - numba_cache:/tmp/numba_cache
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=dashboard.settings
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+      - NUMBA_DISABLE_JIT=0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  celery-default:
+    build: .
+    command: celery -A dashboard worker -n worker.default@%h -Q defaultQueue -l info
+    volumes:
+      - .:/usr/src/app
+      - numba_cache:/tmp/numba_cache
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=dashboard.settings
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+      - NUMBA_DISABLE_JIT=0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  celery-mail:
+    build: .
+    command: celery -A dashboard worker -n worker.default@%h -Q mailQueue -l info
+    volumes:
+      - .:/usr/src/app
+      - numba_cache:/tmp/numba_cache
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=dashboard.settings
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+      - NUMBA_DISABLE_JIT=0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  device_shadow:
+    build: .
+    command: python manage.py device_shadow
+    volumes:
+      - .:/usr/src/app
+      - numba_cache:/tmp/numba_cache
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=dashboard.settings
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+      - NUMBA_DISABLE_JIT=0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  mqtt_listener:
+    build: .
+    command: python manage.py mqtt_listener
+    volumes:
+      - .:/usr/src/app
+      - numba_cache:/tmp/numba_cache
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=dashboard.settings
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+      - NUMBA_DISABLE_JIT=0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+volumes:
+  numba_cache:
+  static_volume:
+  redis_data:
+networks:
+  backend:
+    driver: bridge
