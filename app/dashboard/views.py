@@ -4194,6 +4194,62 @@ def getAlarmHistorySummary(request):
     except:
         return Response({'message':'Something went wrong, please try after sometime'},status=status.HTTP_404_NOT_FOUND)
 
+
+@api_view(['POST'])
+def getAlarmDiagnosticReports(request):
+    try:
+        data = JSONParser().parse(request)
+        alarm_id = data.get("alarm_id")
+        alarm_source = data.get("alarm_source", "alarm_history")
+
+        if not alarm_id:
+            return Response({'message': 'alarm_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if alarm_source not in ["alarm_history", "alarm_queue"]:
+            return Response({'message': 'alarm_source must be "alarm_history" or "alarm_queue"'}, status=status.HTTP_400_BAD_REQUEST)
+
+        filters = {"alarm_history_id": alarm_id} if alarm_source == "alarm_history" else {"alarm_queue_id": alarm_id}
+        reports = (
+            models.AssetDiagnosticReportMaster.objects
+            .filter(**filters)
+            .order_by("-created_at", "-id")
+            .values(
+                "id",
+                "asset_id",
+                "trigger_source",
+                "response_json",
+                "result",
+                "status",
+                "error_message",
+                "created_at",
+                "updated_at",
+            )
+        )
+
+        report_list = []
+        for report in reports:
+            if report.get("created_at"):
+                report["created_at"] = report["created_at"].astimezone(local_tz).strftime('%Y-%m-%d %H:%M')
+            if report.get("updated_at"):
+                report["updated_at"] = report["updated_at"].astimezone(local_tz).strftime('%Y-%m-%d %H:%M')
+            report_list.append(report)
+
+        return Response(
+            {
+                "message": "Success",
+                "alarm_id": alarm_id,
+                "alarm_source": alarm_source,
+                "diagnostic_reports": report_list,
+                "totalCount": len(report_list),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception:
+        return Response(
+            {'message': 'Something went wrong, please try after sometime'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
 @api_view(['POST'])
 def getAssetHealthKPISummary(request):
     try:

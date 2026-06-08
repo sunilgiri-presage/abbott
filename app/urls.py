@@ -26,7 +26,6 @@ urlpatterns = [
     path('set_dynamic_threshold/', thresholdFunctions.CheckDynamicThreshold.as_view(), name='set_dynamic_threshold'),
     path('auto_diagnostics/', calculateAutoDiagnostics, name='auto_diagnostics'),
     path('asset_diagnostics_v4/', cron_views.AssetDiagnosticsV4.as_view(), name='asset_diagnostics_v4'),
-    path('test_asset_diagnostics_alarm_flow/', cron_views.TestAssetDiagnosticsAlarmFlow.as_view(), name='test_asset_diagnostics_alarm_flow'),
 
 
     # ************************* checkThresholdCounterAPI *************************
@@ -151,6 +150,7 @@ urlpatterns = [
     path("get_waterfall_data/", dashboard_views.getWaterfallData),
     path("get_alarm_history_data/", dashboard_views.getAlarmHistoryData),
     path("get_alarm_history_summary/", dashboard_views.getAlarmHistorySummary),
+    path("get_alarm_diagnostic_reports/", dashboard_views.getAlarmDiagnosticReports),
     path("get_asset_health_kpi_summary/", dashboard_views.getAssetHealthKPISummary),
     path("asset_health_status/", dashboard_views.AssetHealthAPI),
     path("asset_health_status_summary/", dashboard_views.getAssetHealthHistory),
